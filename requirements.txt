@@ -1,0 +1,2 @@
+customtkinter
+python3-tk; platform_system == "Linux"
