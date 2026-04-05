@@ -90,8 +90,7 @@ def installDependencies(
                     if not pipInstall(dep) and check:
                         raise RuntimeError(f"Failed to install dependency '{dep}'")
             else:
-                if not pipInstall(dep) and check:
-                    raise RuntimeError(f"Failed to install dependency '{dep}'")
+                subprocess.call([sys.executable, "-m", "pip", "install", "-r", config["internal"]["depPath"]])
         except Exception as e:
             if check:
                 raise RuntimeError(f"Failed to install dependency {dep}: {e}")
