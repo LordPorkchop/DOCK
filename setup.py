@@ -1,9 +1,15 @@
+import configparser
+import time
+from loggingService import Logger
 import os
 from pathlib import Path
 import platform
 import subprocess
 import sys
 from typing import Iterable
+
+config = configparser.ConfigParser()
+config.read("settings.cfg")
 
 
 def getDependencies(fp: Path = Path("./requirements.txt")) -> list[str]:
@@ -91,3 +97,25 @@ def installDependencies(
                 raise RuntimeError(f"Failed to install dependency {dep}: {e}")
             else:
                 continue
+
+
+def main():
+    logger = Logger(name="setup").getLogger()
+
+    if config.getboolean("internal", "setupCompleted"):
+        logger.warning("Setup already completed")
+        logger.info("Exiting with code 0")
+        exit(0)
+
+    logger.debug("Fetching dependencies...")
+    deps = getDependencies(Path(config["internal"]["depPath"]))
+    logger.debug(f"{len(deps)} found, installing...")
+    installDependencies(deps, nonRedundant=True)
+    logger.info("All dependencies installed")
+
+    import requests
+    import keyring
+
+
+if __name__ == "__main__":
+    main()
