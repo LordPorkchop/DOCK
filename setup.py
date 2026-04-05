@@ -1,5 +1,4 @@
 import configparser
-import time
 from loggingService import Logger
 import os
 from pathlib import Path
