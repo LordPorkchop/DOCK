@@ -37,7 +37,7 @@ def requestAuthenticationData() -> dict:
     clientId = config["internal"]["appID"]
     authReqURI = config["internal"]["authReqURI"]
     
-    logger.info("Requesting auth data")
+    logger.info(f"Requesting auth data from {authReqURI}")
 
     response = requests.post(
         authReqURI,
@@ -49,14 +49,12 @@ def requestAuthenticationData() -> dict:
     try:
         response.raise_for_status()
     except requests.HTTPError as e:
-        logger.error(f"Auth response not 2XX: {e}")
-        raise RuntimeError("Auth request failed")
+        raise RuntimeError(f"Auth request failed: {e} (HTTP {response.status_code})")
 
     payload = response.json()
     requiredFields = ("device_code", "user_code", "verification_uri", "interval")
     missingFields = [field for field in requiredFields if field not in payload]
     if missingFields:
-        logger.error(f"Auth response incomplete: missing field {', '.join(missingFields)}")
         raise ValueError(
             f"Missing required fields from auth response: {', '.join(missingFields)}"
         )
@@ -147,7 +145,6 @@ def saveToken(token:str, appName:str="DOCK", accName:str="GitHub") -> None:
 logger = Logger(name=__name__).getLogger()
 try:
     config = _loadConfig()
-    logger.info("Loaded config successfully")
+    logger.info("Config loaded successfully")
 except Exception as e:
-    logger.error(f"Failed to load config: {e}")
     raise RuntimeError("Failed to load config!")
