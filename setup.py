@@ -1,19 +1,10 @@
-import configparser
-from importlib import metadata
-import logging
+import config
 from loggingService import Logger
-import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
-config = configparser.ConfigParser()
-config.read("settings.cfg")
-
-
-def installDependencies(eventLogger: logging.Logger):
-    depFilePath = Path(config["internal"]["depPath"])
+def installDependencies():
     subprocess.run(
         [
             sys.executable,
@@ -21,14 +12,13 @@ def installDependencies(eventLogger: logging.Logger):
             "pip",
             "install",
             "-r",
-            depFilePath
+            Path(config.internal.depPath)
         ],
         capture_output=True,
         shell=False,
         check=True,
         text=True,
-    )
-        
+    )   
 
 def main():
     logger = Logger(name="setup").getLogger()
@@ -37,9 +27,24 @@ def main():
         logger.warning("Setup already completed")
         exit(0)
 
+    logger.info("Creating virtual environment...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "venv", ".venv"],
+            capture_output=True,
+            shell=False,
+            check=True,
+            text=True
+        )
+    except subprocess.CalledProcessError as e:
+        logger.exception(f"Failed to initialize virtual environment: {e}")
+        exit(1)
+
+    logger.info("Activating virtual environment...")
+    ...
     logger.info("Installing dependencies...")
     try:
-        installDependencies(logger)
+        installDependencies()
     except Exception as e:
         logger.exception(f"Failed to install dependencies: {e}")
         exit(1)
