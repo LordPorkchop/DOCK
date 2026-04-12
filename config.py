@@ -1,17 +1,25 @@
-import configparser
-import os
+from __future__ import annotations
+from configparser import ConfigParser
+from pathlib import Path
 from threading import RLock
+from typing import Any
+
+_CONFIG_PATH = Path(__file__).with_name("settings.cfg")
+_PARSER = ConfigParser()
+_LOCK = RLock()
+_LOADED = False
 
 
-def parseValue(value: str):
-    """Convert string to int, float, bool, or keep as string."""
-    value = value.strip()
+def _coerceValue(raw: str) -> Any:
+    value = raw.strip()
+    lowered = value.lower()
 
-    lower = value.lower()
-    if lower in ("true", "yes", "on"):
+    if lowered in {"yes", "true", "on"}:
         return True
-    if lower in ("false", "no", "off"):
+    if lowered in {"no", "off", "false"}:
         return False
+    if lowered == "none":
+        return None
 
     try:
         return int(value)
@@ -26,92 +34,104 @@ def parseValue(value: str):
     return value
 
 
-def serializeValue(value):
-    """Convert Python value to string for storage."""
+def _serializeValue(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if value is None:
+        return "none"
     return str(value)
 
 
-class SectionProxy:
-    def __init__(self, configObj, sectionName):
-        object.__setattr__(self, "_configObj", configObj)
-        object.__setattr__(self, "_sectionName", sectionName)
+def _ensureLoaded() -> None:
+    global _LOADED
 
-    def __getattr__(self, option):
-        parser = self._configObj._parser #type: ignore
+    if _LOADED:
+        return
 
-        if not parser.has_option(self._sectionName, option):
-            raise AttributeError(f"Option '{option}' not found in section '{self._sectionName}'")
+    if not _CONFIG_PATH.exists():
+        raise FileNotFoundError(f"settings file not found: {_CONFIG_PATH}")
 
-        rawValue = parser.get(self._sectionName, option)
-        return parseValue(rawValue)
-
-    def __setattr__(self, option, value):
-        configObj = object.__getattribute__(self, "_configObj")
-        sectionName = object.__getattribute__(self, "_sectionName")
-
-        with configObj._lock:
-            if not configObj._parser.has_section(sectionName):
-                configObj._parser.add_section(sectionName)
-
-            serialized = serializeValue(value)
-            configObj._parser.set(sectionName, option, serialized)
-            configObj.write()
+    _PARSER.read(_CONFIG_PATH, encoding="utf-8")
+    _LOADED = True
 
 
-class Config:
-    def __init__(self, filePath="settings.cfg"):
-        self._filePath = filePath
-        self._parser = configparser.ConfigParser()
-        self._parser.optionxform = str #type: ignore
-        self._lock = RLock()
-
-        if os.path.exists(self._filePath):
-            self._parser.read(self._filePath)
-
-    def __getattr__(self, section):
-        if not self._parser.has_section(section):
-            raise AttributeError(f"Section '{section}' not found")
-        return SectionProxy(self, section)
-
-    def __setattr__(self, name, value):
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-        else:
-            raise AttributeError(
-                "Cannot assign directly to config. Use config.<section>.<option> = value"
-            )
-
-    def write(self):
-        with open(self._filePath, "w") as f:
-            self._parser.write(f)
-
-    def reload(self):
-        with self._lock:
-            self._parser.read(self._filePath)
-
-    def sections(self):
-        return self._parser.sections()
-
-    def hasSection(self, section):
-        return self._parser.has_section(section)
-
-    def addSection(self, section):
-        with self._lock:
-            if not self._parser.has_section(section):
-                self._parser.add_section(section)
-                self.write()
+def _writeLocked() -> None:
+    with _CONFIG_PATH.open("w", encoding="utf-8") as file:
+        _PARSER.write(file)
 
 
-# Singleton instance
-_configInstance = Config()
+class _SectionAccessor:
+    __slots__ = ("_section",)
+
+    def __init__(self, section: str):
+        object.__setattr__(self, "_section", section)
+
+    def __getattr__(self, option: str) -> Any:
+        with _LOCK:
+            _ensureLoaded()
+
+            section = object.__getattribute__(self, "_section")
+            if not _PARSER.has_section(section):
+                raise AttributeError(f"unknown section: {section}")
+            if not _PARSER.has_option(section, option):
+                raise AttributeError(f"unknown option: {section}.{option}")
+
+            return _coerceValue(_PARSER.get(section, option))
+
+    def __setattr__(self, option: str, value: Any) -> None:
+        if option == "_section":
+            object.__setattr__(self, option, value)
+            return
+
+        update(object.__getattribute__(self, "_section"), option, value)
+
+    def __repr__(self) -> str:
+        return f"<ConfigSection {object.__getattribute__(self, '_section')}>"
 
 
-# Module-level access
-def __getattr__(name):
-    return getattr(_configInstance, name)
+def __getattr__(name: str) -> _SectionAccessor:
+    with _LOCK:
+        _ensureLoaded()
+
+        if _PARSER.has_section(name):
+            return _SectionAccessor(name)
+
+    raise AttributeError(f"unknown config section: {name}")
 
 
-def __setattr__(name, value):
-    return setattr(_configInstance, name, value)
+def getValue(section: str, option: str) -> Any:
+    with _LOCK:
+        _ensureLoaded()
+
+        if not _PARSER.has_section(section):
+            raise KeyError(f"unknown section: {section}")
+        if not _PARSER.has_option(section, option):
+            raise KeyError(f"unknown option: {section}.{option}")
+
+        return _coerceValue(_PARSER.get(section, option))
+
+
+def update(section: str, option: str, newValue: Any) -> Any:
+    with _LOCK:
+        _ensureLoaded()
+
+        if not _PARSER.has_section(section):
+            _PARSER.add_section(section)
+
+        _PARSER.set(section, option, _serializeValue(newValue))
+        _writeLocked()
+
+        return _coerceValue(_PARSER.get(section, option))
+
+
+def setValue(section: str, option: str, value: Any) -> Any:
+    return update(section, option, value)
+
+
+def reload() -> None:
+    global _LOADED
+
+    with _LOCK:
+        _PARSER.clear()
+        _LOADED = False
+        _ensureLoaded()

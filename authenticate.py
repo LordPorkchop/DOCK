@@ -1,150 +1,117 @@
-import configparser
-from loggingService import Logger
-from pathlib import Path
+import config
 import keyring
 import requests
 import time
+from typing import Optional
 
 
-def _loadConfig(configPath: Path = Path("./settings.cfg")) -> configparser.ConfigParser:
-    """Loads the configuration from the specified .cfg file
-
-    Args:
-        configPath (Path, optional): The path to the config file. Defaults to "settings.cfg".
+def getAuthenticatonData() -> dict:
+    """Requests auth data from GitHub
 
     Raises:
-        FileNotFoundError: If the specified config file is not found
+        HTTPError: If the web request fails
+        ValueError: If the response is incomplete or invalid
 
     Returns:
-        configparser.ConfigParser: The configuration
+        dict: Containing `deviceCode`, `userCode`, `verificationURI`, `pollingInterval` and `expiresIn`
     """
-    config = configparser.ConfigParser()
-    loaded = config.read(configPath)
-    if not loaded:
-        raise FileNotFoundError(f"Could not read configuration file: {configPath}")
-    return config
+    appID = config.internal.appID
+    uri = config.internal.authReqURI
 
-
-def requestAuthenticationData() -> dict:
-    """Requests authentication process data from endpoint specified in config
-
-    Raises:
-        ValueError: If the endpoint returns incomplete or invalid data
-
-    Returns:
-        dict: The authentication data
-    """
-    clientId = config["internal"]["appID"]
-    authReqURI = config["internal"]["authReqURI"]
-    
-    logger.info(f"Requesting auth data from {authReqURI}")
-
-    response = requests.post(
-        authReqURI,
-        data={"client_id": clientId, "scope": "repo"},
+    res = requests.post(
+        uri,
+        data={"client_id": appID, "scope": "repo"},
         headers={"Accept": "application/json"},
         timeout=15,
     )
     
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as e:
-        raise RuntimeError(f"Auth request failed: {e} (HTTP {response.status_code})")
+    res.raise_for_status()
 
-    payload = response.json()
+    payload = res.json()
     requiredFields = ("device_code", "user_code", "verification_uri", "interval")
     missingFields = [field for field in requiredFields if field not in payload]
     if missingFields:
         raise ValueError(
             f"Missing required fields from auth response: {', '.join(missingFields)}"
         )
-    else:
-        logger.debug("Auth data valid")
 
     return {
         "deviceCode": payload["device_code"],
         "userCode": payload["user_code"],
         "verificationURI": payload["verification_uri"],
-        "interval": int(payload["interval"]),
+        "pollingInterval": int(payload["interval"]),
         "expiresIn": int(payload.get("expires_in", 900)),
     }
 
-
-def pollForAccessToken(deviceCode: str, interval: int) -> str:
-    """Polls for an access token at the endpoint specified in the config every `interval` seconds. Handles "slow_down" error itself by increasing `interval` by 5.
+def pollAndStoreToken(deviceCode: str, deviceCodeExpiry: int, pollingInterval: int, accountName: Optional[str] = None) -> tuple[str, str]:
+    """Retrieves the GitHub access token and saves it to keyring with the specified account name. Will use "github" if none is present
 
     Args:
-        deviceCode (str): The device code received by `requestAuthenticationData()`
-        interval (int): The polling interval received by `requestAuthenticationData()`
+        deviceCode (str): The device code returned by `requestAuthenticationData()`
+        accountName (str, optional): A custom account name for keyring. Defaults to None.
+        pollingInterval (int, optional): Polling interval in seconds. Defaults to 5.
 
     Raises:
-        HTTPError: If an error occurs during POST request. Raised by `requests.Response.raise_for_status()`.
-        TimeoutError: If the device code expires before authentication is finished
-        PermissionError: If the authentication is denied by the user
+        TimeoutError: If the device code expires
+        PermissionError: If the user denies authorization
+        ValueError: If `deviceCode` is invalid
         RuntimeError: If an unknown error occurs
 
     Returns:
-        str: The access token
+        tuple[str, str]: service and account name under which the access token was saved
     """
-    clientId = config["internal"]["appID"]
-    authGetURI = config["internal"]["authGetURI"]
-    authTimeout = int(config["general"].get("authTimeout", "120"))
-
-    serviceName = config["general"].get("appName", "DOCK")
-    accountName = config["general"].get("ghUser", "github") or "github"
-
-    deadline = time.monotonic() + authTimeout
-    currentInterval = max(1, int(interval))
-
+    clientID = config.internal.appID
+    uri = config.internal.authGetURI
+    srvcName = str(config.general.appName).lower()
+    accName = accountName or "github"
+    
+    deadline = time.monotonic() + deviceCodeExpiry
+    cInterval = max(1, pollingInterval)
+    
     while time.monotonic() < deadline:
-        response = requests.post(
-            authGetURI,
+        res = requests.post(
+            uri,
             data={
-                "client_id": clientId,
+                "client_id": clientID,
                 "device_code": deviceCode,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             },
             headers={"Accept": "application/json"},
-            timeout=15,
+            timeout=15
         )
-        response.raise_for_status()
-
-        payload = response.json()
+        
+        res.raise_for_status()
+        
+        payload = res.json()
+        
+        print(payload)
+        
         if "access_token" in payload:
-            accessToken = payload["access_token"]
-            keyring.set_password(serviceName, accountName, accessToken)
-            return accessToken
-
+            token = payload["access_token"]
+            keyring.set_password(srvcName, accName, token)
+            config.update("github", "authCompleted", "true")
+            return srvcName, accName
+        
         errorCode = payload.get("error")
+        
         if errorCode == "authorization_pending":
-            time.sleep(currentInterval)
+            time.sleep(cInterval)
             continue
-
+        
         if errorCode == "slow_down":
-            currentInterval += 5
-            time.sleep(currentInterval)
+            cInterval += 5
+            time.sleep(cInterval)
             continue
-
+        
         if errorCode == "expired_token":
-            raise TimeoutError("Device code expired before authorization completed.")
-
+            raise TimeoutError("Device code expired before authorization was completed")
+        
         if errorCode == "access_denied":
-            raise PermissionError("Authorization was denied by the user.")
-
+            raise PermissionError("User denied authorization")
+        
+        if errorCode == "incorrect_device_code":
+            raise ValueError("Incorrect device code")
+        
         raise RuntimeError(f"Unexpected authentication error: {payload}")
 
-    raise TimeoutError("Timed out waiting for access token.")
-
-def saveToken(token:str, appName:str="DOCK", accName:str="GitHub") -> None:
-    try:
-        keyring.set_password(appName, accName, token)
-    except Exception as e:
-        logger.error(f"Error during token storing: {e}")
-        raise RuntimeError(f"Failed to store token in keychain: {e}")
-
-logger = Logger(name=__name__).getLogger()
-try:
-    config = _loadConfig()
-    logger.info("Config loaded successfully")
-except Exception as e:
-    raise RuntimeError("Failed to load config!")
+    raise TimeoutError("Timed out waiting for access token")

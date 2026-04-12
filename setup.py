@@ -7,7 +7,7 @@ import sys
 def installDependencies():
     subprocess.run(
         [
-            sys.executable,
+            ".\\.venv\\Scripts\\python.exe",
             "-m",
             "pip",
             "install",
@@ -23,25 +23,26 @@ def installDependencies():
 def main():
     logger = Logger(name="setup").getLogger()
 
-    if config.getboolean("internal", "setupCompleted"):
+    if config.internal.setupCompleted:
         logger.warning("Setup already completed")
         exit(0)
+    
+    if Path(".venv").is_dir():
+        logger.info("Virtual environmeant already exists")
+    else:
+        logger.info("Creating virtual environment...")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", ".venv"],
+                capture_output=True,
+                shell=False,
+                check=True,
+                text=True
+            )
+        except subprocess.CalledProcessError as e:
+            logger.exception(f"Failed to initialize virtual environment: {e}")
+            exit(1)
 
-    logger.info("Creating virtual environment...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "venv", ".venv"],
-            capture_output=True,
-            shell=False,
-            check=True,
-            text=True
-        )
-    except subprocess.CalledProcessError as e:
-        logger.exception(f"Failed to initialize virtual environment: {e}")
-        exit(1)
-
-    logger.info("Activating virtual environment...")
-    ...
     logger.info("Installing dependencies...")
     try:
         installDependencies()
